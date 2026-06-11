@@ -25,6 +25,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: copilot-openai-proxy-linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            name: copilot-openai-proxy-linux-arm64
           - target: aarch64-apple-darwin
             os: macos-latest
             name: copilot-openai-proxy-darwin-arm64
