@@ -22,10 +22,10 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: copilot-openai-proxy-windows-amd64.exe
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: copilot-openai-proxy-linux-amd64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             name: copilot-openai-proxy-linux-arm64
           - target: aarch64-apple-darwin
@@ -35,6 +35,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install musl tools (Linux)
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -59,6 +63,7 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/copilot-openai-proxy ${{ matrix.name }}
           chmod +x ${{ matrix.name }}
+          file ${{ matrix.name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
