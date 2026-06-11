@@ -33,7 +33,8 @@ pub async fn auth_middleware(
             error: crate::openai::types::OpenAIErrorBody {
                 message: "invalid API key".to_string(),
                 error_type: "invalid_request_error".to_string(),
-                code: "401".to_string(),
+                param: None,
+                code: None,
             },
         };
         return Ok((StatusCode::UNAUTHORIZED, axum::Json(error)).into_response());

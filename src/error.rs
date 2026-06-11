@@ -5,16 +5,16 @@ use crate::openai::types::OpenAIError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("invalid request: {0}")]
+    #[error("{0}")]
     InvalidRequest(String),
 
-    #[error("copilot upstream error: {0}")]
+    #[error("{0}")]
     CopilotUpstream(String),
 
     #[error("session not found: {0}")]
     SessionNotFound(String),
 
-    #[error("unsupported model: {0}")]
+    #[error("{0}")]
     UnsupportedModel(String),
 
     #[error("websocket error: {0}")]
@@ -57,7 +57,8 @@ impl AppError {
             error: crate::openai::types::OpenAIErrorBody {
                 message: self.to_string(),
                 error_type: self.error_type().to_string(),
-                code: self.status_code().as_u16().to_string(),
+                param: None,
+                code: None,
             },
         }
     }

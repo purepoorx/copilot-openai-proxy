@@ -10,6 +10,7 @@ pub enum CopilotModel {
     Reasoning,
     Research,
     ComputerUse,
+    Coco,
 }
 
 impl CopilotModel {
@@ -22,9 +23,10 @@ impl CopilotModel {
             "reasoning" => Ok(Self::Reasoning),
             "research" => Ok(Self::Research),
             "computer_use" | "computer-use" => Ok(Self::ComputerUse),
+            "coco" => Ok(Self::Coco),
             s if s.starts_with("think-") || s.starts_with("think_") => Ok(Self::Reasoning),
             other => Err(AppError::UnsupportedModel(format!(
-                "unsupported model {other:?}; available: default, chat, smart, reasoning, research, computer_use"
+                "unsupported model {other:?}; available: default, chat, smart, reasoning, research, computer_use, coco"
             ))),
         }
     }
@@ -38,16 +40,16 @@ impl CopilotModel {
             Self::Reasoning => "reasoning",
             Self::Research => "research",
             Self::ComputerUse => "computer_use",
+            Self::Coco => "coco",
         }
     }
 }
 
 /// List of available model names for the /v1/models endpoint
+/// Matches original binary: smart, chat, reasoning, coco
 pub const AVAILABLE_MODELS: &[&str] = &[
-    "default",
-    "chat",
     "smart",
+    "chat",
     "reasoning",
-    "research",
-    "computer_use",
+    "coco",
 ];

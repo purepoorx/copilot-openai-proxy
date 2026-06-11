@@ -150,5 +150,6 @@ pub struct OpenAIErrorBody {
     pub message: String,
     #[serde(rename = "type")]
     pub error_type: String,
-    pub code: String,
+    pub param: Option<String>,
+    pub code: Option<String>,
 }

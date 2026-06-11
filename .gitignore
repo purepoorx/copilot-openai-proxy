@@ -14,6 +14,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Test files
+test/*.json
+test-*.json
+run-tests.ps1
+
 # IDA Pro database
 *.i64
 *.id0
