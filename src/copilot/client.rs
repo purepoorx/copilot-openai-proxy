@@ -93,7 +93,7 @@ impl CopilotClient {
 
         // Send initialization event
         let init_event = ClientEvent::default_options();
-        let init_json = serde_json::to_string(&init_event)?;
+        let init_json = init_event.to_json()?;
         debug!("copilot send: {init_json}");
         ws_sink
             .send(Message::Text(init_json.into()))
@@ -118,6 +118,7 @@ impl CopilotClient {
                         let event = ServerEvent::from_raw(raw);
                         match event {
                             ServerEvent::Connected {
+                                request_id: _rid,
                                 conversation_id: cid,
                             } => {
                                 conversation_id = cid;
@@ -183,7 +184,7 @@ impl CopilotClient {
         // Spawn write loop
         tokio::spawn(async move {
             while let Some(event) = cmd_rx.recv().await {
-                match serde_json::to_string(&event) {
+                match event.to_json() {
                     Ok(json) => {
                         debug!("copilot send: {json}");
                         if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
