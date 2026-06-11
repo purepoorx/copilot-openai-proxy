@@ -60,13 +60,21 @@ pub async fn chat_completions(
     .map_err(|_| AppError::CopilotUpstream("session creation timed out".into()))?
     .map_err(|e| AppError::CopilotUpstream(format!("failed to create session: {e}")))?;
 
-    // Build and send the message: {"model":"...","conversationId":"...","text":"..."}
+    // Send setOptions FIRST (original binary sends this before the text message)
+    let set_options_msg = CopilotClient::build_ws_set_options();
+    timeout(request_timeout, async { msg_tx.send(set_options_msg).await })
+        .await
+        .map_err(|_| AppError::CopilotUpstream("setOptions send timed out".into()))?
+        .map_err(|_| AppError::CopilotUpstream("failed to send setOptions".into()))?;
+
+    // Then send the text message
     let ws_message = CopilotClient::build_ws_message(
         copilot_model.to_copilot_mode(),
         &conversation_id,
         &prompt,
     );
 
+    // Send text message
     timeout(request_timeout, async { msg_tx.send(ws_message).await })
         .await
         .map_err(|_| AppError::CopilotUpstream("message send timed out".into()))?

@@ -81,8 +81,8 @@ impl CopilotClient {
             ));
         }
 
-        // Extract X-Copilot-Conversation-Id header
-        let conversation_id = resp
+        // Extract conversation ID from header (fallback)
+        let header_conversation_id = resp
             .headers()
             .get("X-Copilot-Conversation-Id")
             .and_then(|v| v.to_str().ok())
@@ -101,13 +101,18 @@ impl CopilotClient {
             }
         }
 
-        // Also check response body
+        // Parse response body for conversation ID and blocked status
         let body_text = resp.text().await.unwrap_or_default();
         debug!("copilot start body: {body_text}");
 
+        let mut conversation_id = header_conversation_id;
         if let Ok(start_resp) = serde_json::from_str::<StartResponse>(&body_text) {
             if start_resp.is_blocked {
                 warn!("copilot start reports user is blocked");
+            }
+            // Prefer currentConversationId from body over header
+            if !start_resp.current_conversation_id.is_empty() {
+                conversation_id = start_resp.current_conversation_id;
             }
         }
 
@@ -257,13 +262,25 @@ impl CopilotClient {
         Ok((event_rx, msg_tx, final_cid))
     }
 
-    /// Send a user message to the Copilot WebSocket.
-    /// The message format is: {"model":"...", "conversationId":"...", "text":"..."}
-    pub fn build_ws_message(model: &str, conversation_id: &str, text: &str) -> String {
+    /// Build setOptions message for WebSocket
+    /// Must include "event" field: {"event":"setOptions","timeZone":"Asia/Shanghai",...}
+    pub fn build_ws_set_options() -> String {
+        let mut v: serde_json::Value = serde_json::from_str(SET_OPTIONS_BODY).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "event".to_string(),
+            serde_json::Value::String("setOptions".to_string()),
+        );
+        v.to_string()
+    }
+
+    /// Build the WebSocket message to send a user prompt.
+    /// Format: {"event":"send","mode":"...","conversationId":"...","content":[{"text":"...","type":"text"}]}
+    pub fn build_ws_message(mode: &str, conversation_id: &str, text: &str) -> String {
         serde_json::json!({
-            "model": model,
+            "event": "send",
+            "mode": mode,
             "conversationId": conversation_id,
-            "text": text
+            "content": [{"text": text, "type": "text"}]
         })
         .to_string()
     }
