@@ -10,7 +10,7 @@ const COPILOT_BASE_URL: &str = "https://copilot.microsoft.com";
 /// Acquire an anonymous cookie by visiting the Copilot homepage.
 /// Follows redirects manually to capture cookies at each hop.
 /// Returns a cookie jar containing the `__Host-copilot-anon` cookie.
-pub async fn acquire_anon_cookie(http: &reqwest::Client) -> Result<Arc<Jar>> {
+pub async fn acquire_anon_cookie(_http: &reqwest::Client) -> Result<Arc<Jar>> {
     info!("acquiring copilot anon cookie");
 
     let jar = Arc::new(Jar::default());

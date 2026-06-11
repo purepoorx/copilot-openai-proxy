@@ -95,9 +95,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&copilot_client),
     ));
 
-    // Start background session cleanup
-    session_manager.clone().spawn_cleanup_task();
-
     // Build app state and router
     let state = AppState {
         config: Arc::clone(&config),

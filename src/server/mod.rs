@@ -3,7 +3,7 @@ pub mod middleware;
 
 use std::sync::Arc;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::config::Config;

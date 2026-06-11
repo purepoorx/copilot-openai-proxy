@@ -3,15 +3,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use reqwest::cookie::Jar;
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
-use crate::copilot::cookie::{acquire_anon_cookie, build_cookie_header, get_anon_cookie_value};
-use crate::copilot::protocol::{ClientEvent, RawServerEvent, ServerEvent};
+use crate::copilot::protocol::{RawServerEvent, ServerEvent};
 use crate::error::AppError;
 
 /// The Copilot User-Agent to impersonate
@@ -21,7 +20,22 @@ pub const COPILOT_USER_AGENT: &str =
 /// WebSocket endpoint
 const WS_CHAT_URL: &str = "wss://copilot.microsoft.com/c/api/chat";
 
-/// The core Copilot client that manages WebSocket connections and interactions
+/// HTTP POST endpoint for session initialization
+const API_START_URL: &str = "https://copilot.microsoft.com/c/api/start";
+
+/// Pre-serialized setOptions JSON body (matches original binary exactly)
+const SET_OPTIONS_BODY: &str = r#"{"timeZone":"Asia/Shanghai","startNewConversation":true,"teenSupportEnabled":true,"correctPersonalizationSetting":true,"deferredDataUseCapable":true}"#;
+
+/// Response from /c/api/start
+#[derive(Debug, Deserialize)]
+pub struct StartResponse {
+    #[serde(rename = "isBlocked", default)]
+    pub is_blocked: bool,
+    #[serde(rename = "currentConversationId", default)]
+    pub current_conversation_id: String,
+}
+
+/// The core Copilot client
 pub struct CopilotClient {
     pub http: reqwest::Client,
     pub config: Arc<Config>,
@@ -40,27 +54,84 @@ impl CopilotClient {
         Ok(Self { http, config })
     }
 
-    /// Acquire anonymous cookie
-    pub async fn get_anon_cookie(&self) -> Result<Arc<Jar>> {
-        acquire_anon_cookie(&self.http).await
+    /// Initialize a session by POSTing to /c/api/start.
+    /// Returns: (anon_cookie_value, conversation_id)
+    pub async fn init_session(&self) -> Result<SessionInit> {
+        info!("initializing copilot session via HTTP POST");
+
+        let resp = self
+            .http
+            .post(API_START_URL)
+            .header("Content-Type", "application/json")
+            .header("Referer", "https://copilot.microsoft.com")
+            .header("Accept", "application/json")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .body(SET_OPTIONS_BODY)
+            .send()
+            .await
+            .context("copilot start request failed")?;
+
+        let status = resp.status();
+        debug!("copilot start response: {status}");
+
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "copilot start returned status {status}: {body}"
+            ));
+        }
+
+        // Extract X-Copilot-Conversation-Id header
+        let conversation_id = resp
+            .headers()
+            .get("X-Copilot-Conversation-Id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        // Extract __Host-copilot-anon cookie from Set-Cookie headers
+        let mut anon_cookie = None;
+        for cookie_header in resp.headers().get_all(reqwest::header::SET_COOKIE) {
+            if let Ok(cookie_str) = cookie_header.to_str() {
+                if let Some(value) = cookie_str.strip_prefix("__Host-copilot-anon=") {
+                    let value = value.split(';').next().unwrap_or("").to_string();
+                    anon_cookie = Some(value);
+                    debug!("acquired __Host-copilot-anon cookie from start response");
+                }
+            }
+        }
+
+        // Also check response body
+        let body_text = resp.text().await.unwrap_or_default();
+        debug!("copilot start body: {body_text}");
+
+        if let Ok(start_resp) = serde_json::from_str::<StartResponse>(&body_text) {
+            if start_resp.is_blocked {
+                warn!("copilot start reports user is blocked");
+            }
+        }
+
+        let cookie = anon_cookie
+            .ok_or_else(|| anyhow::anyhow!("copilot start did not return __Host-copilot-anon cookie"))?;
+
+        info!("acquired copilot session cookie, conversation: {conversation_id}");
+
+        Ok(SessionInit {
+            anon_cookie: cookie,
+            conversation_id,
+        })
     }
 
-    /// Establish a WebSocket connection and perform the initialization handshake.
-    /// Returns (event_receiver, command_sender, conversation_id).
-    pub async fn connect_ws(
+    /// Connect WebSocket and perform the full session handshake.
+    /// Returns (event_receiver, conversation_id).
+    pub async fn connect_and_start(
         &self,
-        jar: &Arc<Jar>,
-    ) -> Result<(
-        mpsc::Receiver<ServerEvent>,
-        mpsc::Sender<ClientEvent>,
-        String,
-    )> {
-        let _cookie_header = build_cookie_header(jar);
-        let cookie_value = get_anon_cookie_value(jar)
-            .ok_or_else(|| anyhow::anyhow!("no __Host-copilot-anon cookie found"))?;
+        session: &SessionInit,
+    ) -> Result<(mpsc::Receiver<ServerEvent>, mpsc::Sender<String>, String)> {
+        let cookie_value = &session.anon_cookie;
+        let conversation_id = session.conversation_id.clone();
 
         // Build WebSocket request
-        let host = "copilot.microsoft.com";
         let request = tokio_tungstenite::tungstenite::http::Request::builder()
             .uri(WS_CHAT_URL)
             .header("User-Agent", COPILOT_USER_AGENT)
@@ -74,7 +145,7 @@ impl CopilotClient {
                 "Sec-WebSocket-Key",
                 tokio_tungstenite::tungstenite::handshake::client::generate_key(),
             )
-            .header("Host", host)
+            .header("Host", "copilot.microsoft.com")
             .body(())
             .context("failed to build WebSocket request")?;
 
@@ -91,62 +162,49 @@ impl CopilotClient {
 
         let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
 
-        // Send initialization event
-        let init_event = ClientEvent::default_options();
-        let init_json = init_event.to_json()?;
-        debug!("copilot send: {init_json}");
-        ws_sink
-            .send(Message::Text(init_json.into()))
-            .await
-            .context("failed to send init event")?;
-
-        // Wait for connected event to get conversation_id
-        let mut conversation_id;
+        // Wait for connected event
         let connect_timeout = Duration::from_secs(self.config.conn_timeout);
+        let msg = timeout(connect_timeout, ws_stream_rx.next())
+            .await
+            .context("timed out waiting for connected event")?
+            .context("WebSocket closed before connected event")?
+            .context("WebSocket receive error")?;
 
-        loop {
-            let msg = timeout(connect_timeout, ws_stream_rx.next())
-                .await
-                .context("timed out waiting for connected event")?
-                .context("WebSocket closed before connected event")?
-                .context("WebSocket receive error")?;
-
-            match msg {
-                Message::Text(text) => {
-                    debug!("copilot event raw: {text}");
-                    if let Ok(raw) = serde_json::from_str::<RawServerEvent>(&text) {
-                        let event = ServerEvent::from_raw(raw);
-                        match event {
-                            ServerEvent::Connected {
-                                request_id: _rid,
-                                conversation_id: cid,
-                            } => {
-                                conversation_id = cid;
-                                info!("copilot connected, conversation: {conversation_id}");
-                                break;
-                            }
-                            ServerEvent::Error { message, .. } => {
-                                return Err(AppError::CopilotUpstream(message).into());
-                            }
-                            _ => {
-                                debug!("ignoring event while waiting for connected");
-                            }
+        let final_cid = match msg {
+            Message::Text(text) => {
+                let text_str = text.to_string();
+                debug!("copilot connected event: {text_str}");
+                if let Ok(raw) = serde_json::from_str::<RawServerEvent>(&text_str) {
+                    match ServerEvent::from_raw(raw) {
+                        ServerEvent::Connected {
+                            conversation_id: cid,
+                            ..
+                        } => {
+                            if !cid.is_empty() { cid } else { conversation_id }
                         }
+                        ServerEvent::Error { message, .. } => {
+                            return Err(AppError::CopilotUpstream(message).into());
+                        }
+                        _ => conversation_id,
                     }
+                } else {
+                    conversation_id
                 }
-                Message::Close(_) => {
-                    return Err(AppError::CopilotUpstream(
-                        "WebSocket closed during handshake".into(),
-                    )
-                    .into());
-                }
-                _ => {}
             }
-        }
+            Message::Close(_) => {
+                return Err(AppError::CopilotUpstream(
+                    "WebSocket closed during handshake".into(),
+                )
+                .into());
+            }
+            _ => conversation_id,
+        };
 
-        // Create channels for bidirectional communication
+        info!("copilot session ready, conversation: {final_cid}");
+
+        // Create channels
         let (event_tx, event_rx) = mpsc::channel::<ServerEvent>(128);
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ClientEvent>(64);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<String>(1);
 
         // Spawn read loop
         let debug_mode = self.config.debug;
@@ -154,10 +212,11 @@ impl CopilotClient {
             while let Some(msg_result) = ws_stream_rx.next().await {
                 match msg_result {
                     Ok(Message::Text(text)) => {
+                        let text_str = text.to_string();
                         if debug_mode {
-                            debug!("copilot event raw: {text}");
+                            debug!("copilot event raw: {text_str}");
                         }
-                        if let Ok(raw) = serde_json::from_str::<RawServerEvent>(&text) {
+                        if let Ok(raw) = serde_json::from_str::<RawServerEvent>(&text_str) {
                             let event = ServerEvent::from_raw(raw);
                             if event_tx.send(event).await.is_err() {
                                 debug!("event receiver dropped, stopping read loop");
@@ -169,7 +228,7 @@ impl CopilotClient {
                         info!("WebSocket closed by server");
                         break;
                     }
-                    Ok(Message::Ping(_data)) => {
+                    Ok(Message::Ping(_)) => {
                         debug!("received ping, pong handled by tungstenite");
                     }
                     Err(e) => {
@@ -181,24 +240,37 @@ impl CopilotClient {
             }
         });
 
-        // Spawn write loop
+        // Spawn write loop - receives JSON strings and sends them over WebSocket
         tokio::spawn(async move {
-            while let Some(event) = cmd_rx.recv().await {
-                match event.to_json() {
-                    Ok(json) => {
-                        debug!("copilot send: {json}");
-                        if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
-                            error!("WebSocket write error: {e}");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        error!("failed to serialize client event: {e}");
-                    }
+            while let Some(json) = msg_rx.recv().await {
+                if debug_mode {
+                    debug!("copilot send: {json}");
+                }
+                if let Err(e) = ws_sink.send(Message::Text(json.into())).await {
+                    warn!("WebSocket write error: {e}");
+                    break;
                 }
             }
+            // Keep ws_sink alive until msg_rx is closed
         });
 
-        Ok((event_rx, cmd_tx, conversation_id))
+        Ok((event_rx, msg_tx, final_cid))
     }
+
+    /// Send a user message to the Copilot WebSocket.
+    /// The message format is: {"model":"...", "conversationId":"...", "text":"..."}
+    pub fn build_ws_message(model: &str, conversation_id: &str, text: &str) -> String {
+        serde_json::json!({
+            "model": model,
+            "conversationId": conversation_id,
+            "text": text
+        })
+        .to_string()
+    }
+}
+
+/// Session initialization result from HTTP POST /c/api/start
+pub struct SessionInit {
+    pub anon_cookie: String,
+    pub conversation_id: String,
 }

@@ -7,9 +7,9 @@ use axum::Json;
 use tokio::time::timeout;
 use tracing::{debug, info};
 
-use crate::copilot::protocol::{ClientEvent, ServerEvent};
+use crate::copilot::client::CopilotClient;
+use crate::copilot::protocol::ServerEvent;
 use crate::error::AppError;
-use crate::openai::adapter::build_append_text;
 use crate::openai::model::CopilotModel;
 use crate::openai::types::{ImageGenerationRequest, ImageGenerationResponse, ImageData};
 use crate::server::AppState;
@@ -42,36 +42,34 @@ pub async fn image_generations(
     }
 
     let model_name = request.model.as_deref().unwrap_or("default");
-    let _model = CopilotModel::from_openai_name(model_name)?;
+    let copilot_model = CopilotModel::from_openai_name(model_name)?;
 
     info!("image generation request: model={}, prompt_len={}", model_name, request.prompt.len());
 
-    // Extract session ID
-    let session_id = headers
-        .get("x-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
     let request_timeout = Duration::from_secs(state.config.timeout);
 
-    // Get or create session
-    let (event_rx, session) = timeout(
+    // Create a fresh session
+    let (mut event_rx, msg_tx, conversation_id) = timeout(
         request_timeout,
-        state.session_manager.get_or_create(session_id.as_deref()),
+        state.session_manager.create_session(),
     )
     .await
     .map_err(|_| AppError::CopilotUpstream("session creation timed out".into()))?
     .map_err(|e| AppError::CopilotUpstream(format!("failed to create session: {e}")))?;
 
-    // Send the image generation prompt
-    session
-        .cmd_tx
-        .send(build_append_text(request.prompt))
+    // Build and send the image generation prompt
+    let ws_message = CopilotClient::build_ws_message(
+        copilot_model.to_copilot_mode(),
+        &conversation_id,
+        &request.prompt,
+    );
+
+    timeout(request_timeout, async { msg_tx.send(ws_message).await })
         .await
+        .map_err(|_| AppError::CopilotUpstream("message send timed out".into()))?
         .map_err(|_| AppError::CopilotUpstream("failed to send prompt".into()))?;
 
     // Wait for image_generated event
-    let mut event_rx = event_rx;
     let mut image_url = String::new();
 
     let result = timeout(request_timeout, async {
@@ -91,7 +89,6 @@ pub async fn image_generations(
                     return Err(AppError::CopilotUpstream(message));
                 }
                 Some(ServerEvent::TurnComplete) | None => {
-                    // If we got turn complete without image, check if we got a URL
                     if image_url.is_empty() {
                         return Err(AppError::CopilotUpstream(
                             "copilot finished without imageGenerated event".into(),
@@ -99,9 +96,7 @@ pub async fn image_generations(
                     }
                     return Ok(());
                 }
-                Some(_) => {
-                    // Continue waiting (image_generating, text deltas, etc.)
-                }
+                Some(_) => {}
             }
         }
     })
