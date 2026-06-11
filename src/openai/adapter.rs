@@ -57,7 +57,7 @@ pub fn extract_image_urls(msg: &ChatMessage) -> Vec<String> {
 
 /// Build a ClientEvent::AppendText from a prompt string
 pub fn build_append_text(text: String) -> ClientEvent {
-    ClientEvent::AppendText { text }
+    ClientEvent::append_text(text)
 }
 
 /// Build a ClientEvent::TapToReveal for an uploaded image attachment

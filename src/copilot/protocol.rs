@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::util::id;
+
 // ─── Client -> Server Events ───
 
 /// Wrapper for all client events sent to Copilot backend.
@@ -38,6 +40,10 @@ pub struct SetOptionsPayload {
 #[derive(Debug, Serialize)]
 pub struct AppendTextPayload {
     pub text: String,
+    #[serde(rename = "partId")]
+    pub part_id: String,
+    #[serde(rename = "messageId")]
+    pub message_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,14 +56,29 @@ pub struct TapToRevealPayload {
 #[derive(Debug)]
 pub enum ClientEvent {
     SetOptions,
-    AppendText { text: String },
-    TapToReveal { attachment_id: String },
+    AppendText {
+        text: String,
+        part_id: String,
+        message_id: String,
+    },
+    TapToReveal {
+        attachment_id: String,
+    },
 }
 
 impl ClientEvent {
     /// Create the default setOptions initialization event
     pub fn default_options() -> Self {
         ClientEvent::SetOptions
+    }
+
+    /// Create an appendText event with auto-generated IDs
+    pub fn append_text(text: String) -> Self {
+        ClientEvent::AppendText {
+            text,
+            part_id: id::generate_uuid(),
+            message_id: id::generate_uuid(),
+        }
     }
 
     /// Serialize to JSON string for WebSocket transmission
@@ -73,10 +94,16 @@ impl ClientEvent {
                     deferred_data_use_capable: true,
                 }),
             },
-            ClientEvent::AppendText { text } => ClientEventEnvelope {
+            ClientEvent::AppendText {
+                text,
+                part_id,
+                message_id,
+            } => ClientEventEnvelope {
                 event: "appendText".to_string(),
                 payload: ClientEventPayload::AppendText(AppendTextPayload {
                     text: text.clone(),
+                    part_id: part_id.clone(),
+                    message_id: message_id.clone(),
                 }),
             },
             ClientEvent::TapToReveal { attachment_id } => ClientEventEnvelope {
